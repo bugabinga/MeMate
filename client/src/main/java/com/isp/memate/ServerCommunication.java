@@ -77,7 +77,7 @@ public class ServerCommunication
       }
       else
       {
-        socket = new Socket( "192.168.168.82", 3142 );
+        socket = new Socket( "127.0.0.1", 3142 );
       }
       outStream = new ObjectOutputStream( socket.getOutputStream() );
       inStream = new ObjectInputStream( socket.getInputStream() );

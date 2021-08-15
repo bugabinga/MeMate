@@ -28,7 +28,7 @@ class ServerLog
   private static final DateTimeFormatter formatter   = DateTimeFormatter.ofPattern( "d MMM HH:mm:ss.SSS" );
 
   /**
-   * Erstellt ein neuen Log, abhänig von den logType
+   * Erstellt ein neuen Log, abhängig von dem <code>logType</code>.
    * 
    * @param logType Typ des Logs
    * @param message Nachricht

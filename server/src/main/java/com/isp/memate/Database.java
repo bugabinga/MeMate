@@ -28,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 import com.isp.memate.ServerLog.logType;
@@ -76,7 +77,9 @@ class Database
     {
       conn = DriverManager.getConnection( "jdbc:sqlite:" + dataBasePath );
 
-      //Cuz SQLite is kinda retarted, we have to enable FKs.
+      //Aus backwards-compat-Gründen ist Foreign-Key-Support standardmäßig aus in
+      //SQLite.
+      //Es muss pro Session aktiviert werden.
       final Statement stmt = conn.createStatement();
       final String sql = "PRAGMA foreign_keys = ON";
       stmt.execute( sql );
@@ -93,7 +96,6 @@ class Database
     addIngredientsTable();
     cleanSessionIDTable();
   }
-
 
   /**
    * Erstellt den Drink-Table in der Datenbank, falls dieser noch nicht existiert.
@@ -152,8 +154,9 @@ class Database
     final String sql = "CREATE TABLE IF NOT EXISTS user ("
         + "ID INTEGER PRIMARY KEY AUTOINCREMENT,"
         + "guthaben double NOT NULL,"
-        + "username string UNIQUE NOT NULL,"
+        + "username string NOT NULL UNIQUE,"
         + "password string NOT NULL,"
+        + "barcode string NOT NULL UNIQUE,"
         + "requestNewPassword boolean DEFAULT (false),"
         + "DisplayName string UNIQUE"
         + ");";
@@ -330,7 +333,7 @@ class Database
   }
 
   /**
-   * Legt einen neuen Datenbankeintrag mit den gegebenen Informationen in dem table user an.
+   * Legt einen neuen Datenbankeintrag mit den gegebenen Informationen in der Tabelle <code>user</code> an.
    *
    * @param username Benutzername
    * @param password Passwort
@@ -340,13 +343,14 @@ class Database
   String registerNewUser( final String username, final String password )
   {
     lock.lock();
-    final String sql = "INSERT INTO user(guthaben,username,password,DisplayName) VALUES(?,?,?,?)";
+    final String sql = "INSERT INTO user(guthaben,username,password,barcode,DisplayName) VALUES(?,?,?,?,?)";
     try ( PreparedStatement pstmt = conn.prepareStatement( sql ) )
     {
       pstmt.setFloat( 1, 0f );
       pstmt.setString( 2, username );
       pstmt.setString( 3, password );
-      pstmt.setString( 4, username );
+      pstmt.setString( 4, generateRandomUniqueBarcode() );
+      pstmt.setString( 5, username );
       pstmt.executeUpdate();
     }
     catch ( final SQLException e )
@@ -360,6 +364,95 @@ class Database
     }
     ServerLog.newLog( logType.INFO, "Registrierung erfolgreich." );
     return "Registrierung erfolgreich.";
+  }
+
+  /**
+   *  Erzeugt einen neuen, zufälligen EAN-13 Barcode.
+   */
+  String generateRandomUniqueBarcode()
+  {
+    /*
+     * Um einen zufälligen EAN-13 Barcode zu generieren reicht es 12 zufällige Ziffern auszuwählen.
+     * Nur die 13te Ziffer muss eine spezielle Checksum-Ziffer sein.
+     */
+    final var allowedCharacters = new char[]{'0','1','2','3','4','5','6','7','8','9'};
+    final var barcode = new StringBuilder(13);
+    final var random = ThreadLocalRandom.current();
+    for (int index = 0; index < 12; ++index)
+    {
+      final var randomCharacterIndex = random.nextInt(10);
+      final var randomCharacter = allowedCharacters[randomCharacterIndex];
+      barcode.append(randomCharacter);
+    }
+    final var checksum = getStandardUPCEANChecksum(barcode);
+    barcode.append(checksum);
+    final var barcodeValue = barcode.toString();
+    //FIXME: wenn im Fehlerfall die isBarcodeUniqueForUsers-Methode "false" zurückliefert, landen wir hier in einem infinite-loop. 
+    if(isBarcodeUniqueForUsers(barcodeValue))
+    {
+      return barcodeValue;
+    }
+    return generateRandomUniqueBarcode();
+  }
+
+  /**
+   * Prüft ob der übergebene Barcode bereits zu einem Benutzer in der DB zugewiesen wurde.
+   * @param barcode Ein beliebiger EAN-13-Barcode.
+   */
+  private boolean isBarcodeUniqueForUsers(CharSequence barcode)
+  {
+    final var sql = "SELECT count(*) FROM user WHERE barcode = ?";
+    try ( final var statement = conn.prepareStatement(sql))
+    {
+      statement.setString(1, barcode.toString());
+      try (final var result = statement.executeQuery())
+      {
+        if (!result.next())
+        {
+          throw new RuntimeException("Ein `SELECT count(...)` sollte IMMER mindestens eine Reihe zurückliefern. Was ist hier bloß geschehen?");
+        }
+        return result.getLong(1) == 0;
+      }
+    }
+    catch ( final SQLException exception )
+    {
+      ServerLog.newLog( logType.SQL, exception.getMessage() );
+      return false;
+    }
+  }
+
+  /**
+   * Diese Methode wurde kopier und angepasst aus ZXing, einer Java-Bibliothek für Barcodes, welche auch den EAN-13-Standard unterstützt.
+   * EAN-13-Barcodes haben als letzte Ziffer eine besondere Checkum, die sich aus den 12 verherigen Ziffern zusammensetzt.
+   *
+   * Diese Methode berechtet diese Checksum haben als letzte Ziffer eine besondere Checkum, die sich aus den 12 verherigen Ziffern zusammensetzt.
+   *
+   * Diese Methode berechtet diese Checksum..
+   */
+  private static int getStandardUPCEANChecksum(CharSequence twelveDigits) throws IllegalArgumentException
+  {
+    int length = twelveDigits.length();
+    int sum = 0;
+    for (int index = length - 1; index >= 0; index -= 2)
+    {
+      int digit = twelveDigits.charAt(index) - '0';
+      if (digit < 0 || digit > 9)
+      {
+        throw new IllegalArgumentException("Barcodeziffern dürfen nur aus 0-9 bestehen.");
+      }
+      sum += digit;
+    }
+    sum *= 3;
+    for (int index = length - 2; index >= 0; index -= 2)
+    {
+      int digit = twelveDigits.charAt(index) - '0';
+      if (digit < 0 || digit > 9)
+      {
+        throw new IllegalArgumentException("Barcodeziffern dürfen nur aus 0-9 bestehen.");
+      }
+      sum += digit;
+    }
+    return (1000 - sum) % 10;
   }
 
   /**
